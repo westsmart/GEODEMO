@@ -289,36 +289,6 @@
         wallGroup.add(new THREE.Line(vertGeo, edgeMat));
       }
 
-      // ── Etiqueta flotante en el centro del polígono ──
-      const cLon = VERTICES_GEO.reduce((s,v) => s + v.lon, 0) / VERTICES_GEO.length;
-      const cLat = VERTICES_GEO.reduce((s,v) => s + v.lat, 0) / VERTICES_GEO.length;
-      const cECEF = geoToECEF(cLon, cLat, 0);
-      const cENU  = ecefToENU(cECEF, originECEF, userLon, userLat);
-      cENU.y = -EYE_HEIGHT + WALL_HEIGHT + 3;
-
-      const cv = document.createElement('canvas');
-      cv.width = 256; cv.height = 128;
-      const ctx = cv.getContext('2d');
-      ctx.fillStyle = 'rgba(0,0,0,0.8)';
-      ctx.beginPath();
-      ctx.roundRect(4, 4, 248, 120, 14);
-      ctx.fill();
-      ctx.fillStyle = '#FFFFFF';
-      ctx.font = 'bold 34px Arial';
-      ctx.textAlign = 'center';
-      ctx.fillText('ZONA 1', 128, 52);
-      ctx.font = '22px Arial';
-      ctx.fillStyle = '#FF4444';
-      ctx.fillText('ID: 1', 128, 90);
-
-      const tex    = new THREE.CanvasTexture(cv);
-      const sprite = new THREE.Sprite(
-        new THREE.SpriteMaterial({ map: tex, transparent: true })
-      );
-      sprite.scale.set(20, 10, 1);
-      sprite.position.copy(cENU);
-      wallGroup.add(sprite);
-
       scene.add(wallGroup);
     }
 
