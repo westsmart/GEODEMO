@@ -20,7 +20,6 @@
       font-size: 13px;
       z-index: 200;
       text-align: center;
-      white-space: nowrap;
     }
 
     #status {
@@ -73,59 +72,124 @@
   <video id="video" autoplay playsinline muted></video>
   <canvas id="three-canvas"></canvas>
 
-  <div id="info">📍 GEODEMO — ZONA 1</div>
+  <div id="info">👆 Toca para activar sensores</div>
   <div id="debug">Iniciando...</div>
   <div id="status">📡 Esperando GPS...</div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 
   <script>
-    // ── POLÍGONO ZONA1 ────────────────────────────────────────────────────
-    const POLYGON_COORDS = [
-      [-70.668177278025937, -33.454657926808004],
-      [-70.667171620456187, -33.454476908445450],
-      [-70.667155164241407, -33.454559189519337],
-      [-70.668169964152710, -33.454736550945277],
-      [-70.668177278025937, -33.454657926808004]
+    // ════════════════════════════════════════════════════════════════════
+    // DATOS: ZONA1 — vértices en WGS84 (lon, lat)
+    // ════════════════════════════════════════════════════════════════════
+    const VERTICES_GEO = [
+      { lon: -70.668177278025937, lat: -33.454657926808004 },
+      { lon: -70.667171620456187, lat: -33.454476908445450 },
+      { lon: -70.667155164241407, lat: -33.454559189519337 },
+      { lon: -70.668169964152710, lat: -33.454736550945277 },
     ];
 
-    const CENTER_LON = -70.667666;
-    const CENTER_LAT = -33.454617;
+    const WALL_HEIGHT = 5;   // metros de altura de las paredes
+    const EYE_HEIGHT  = 1.6; // altura de la cámara del usuario (metros)
 
-    // ── ESTADO ────────────────────────────────────────────────────────────
-    let userLat = null, userLon = null;
-    let scene, camera, renderer;
+    // ════════════════════════════════════════════════════════════════════
+    // ECEF — Earth-Centered Earth-Fixed
+    // Convierte (lon°, lat°, alt_m) → (X, Y, Z) en metros absolutos
+    // ════════════════════════════════════════════════════════════════════
+    const WGS84_A  = 6378137.0;
+    const WGS84_E2 = 0.00669437999014;
 
-    // Orientación cruda del dispositivo
+    function geoToECEF(lon_deg, lat_deg, alt = 0) {
+      const lon = lon_deg * Math.PI / 180;
+      const lat = lat_deg * Math.PI / 180;
+      const N = WGS84_A / Math.sqrt(1 - WGS84_E2 * Math.sin(lat) ** 2);
+      return new THREE.Vector3(
+        (N + alt) * Math.cos(lat) * Math.cos(lon),
+        (N + alt) * Math.cos(lat) * Math.sin(lon),
+        (N * (1 - WGS84_E2) + alt) * Math.sin(lat)
+      );
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // ENU — East North Up
+    // Marco local centrado en el usuario.
+    // Convierte un punto ECEF al espacio ENU del origen dado.
+    // ════════════════════════════════════════════════════════════════════
+    function ecefToENU(point_ecef, origin_ecef, origin_lon_deg, origin_lat_deg) {
+      const lon = origin_lon_deg * Math.PI / 180;
+      const lat = origin_lat_deg * Math.PI / 180;
+
+      const dx = point_ecef.x - origin_ecef.x;
+      const dy = point_ecef.y - origin_ecef.y;
+      const dz = point_ecef.z - origin_ecef.z;
+
+      // Matriz rotación ECEF→ENU
+      const e = new THREE.Vector3(
+        -Math.sin(lon),
+         Math.cos(lon),
+         0
+      );
+      const n = new THREE.Vector3(
+        -Math.sin(lat) * Math.cos(lon),
+        -Math.sin(lat) * Math.sin(lon),
+         Math.cos(lat)
+      );
+      const u = new THREE.Vector3(
+         Math.cos(lat) * Math.cos(lon),
+         Math.cos(lat) * Math.sin(lon),
+         Math.sin(lat)
+      );
+
+      return new THREE.Vector3(
+        e.x*dx + e.y*dy + e.z*dz,  // East  → X en Three.js
+        u.x*dx + u.y*dy + u.z*dz,  // Up    → Y en Three.js
+        -(n.x*dx + n.y*dy + n.z*dz) // North → -Z en Three.js (conv. OpenGL)
+      );
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // ORIENTACIÓN — DeviceOrientation → Quaternion ENU
+    // Convierte los ángulos del sensor al marco ENU local correcto
+    // para cualquier posición del teléfono (vertical, horizontal, etc.)
+    // ════════════════════════════════════════════════════════════════════
     let devAlpha = 0, devBeta = 90, devGamma = 0;
+    let orientationReady = false;
 
-    const statusEl = document.getElementById('status');
-    const debugEl  = document.getElementById('debug');
+    // Quaternion de corrección para pantalla portrait (cámara trasera)
+    // Rota el marco del dispositivo al marco de la cámara Three.js
+    const Q_SCREEN = new THREE.Quaternion(
+      -Math.SQRT1_2, 0, 0, Math.SQRT1_2
+    );
 
-    // ── CÁMARA ────────────────────────────────────────────────────────────
-    async function startCamera() {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'environment' },
-          audio: false
-        });
-        document.getElementById('video').srcObject = stream;
-      } catch(e) {
-        statusEl.textContent = '❌ Sin acceso a cámara';
-      }
+    function getENUQuaternion() {
+      const DEG = THREE.MathUtils.degToRad;
+
+      // Spec W3C DeviceOrientation: rotación intrínseca Z-X-Y
+      const qZ = new THREE.Quaternion().setFromAxisAngle(
+        new THREE.Vector3(0, 0, 1), DEG(-devAlpha)
+      );
+      const qX = new THREE.Quaternion().setFromAxisAngle(
+        new THREE.Vector3(1, 0, 0), DEG(devBeta)
+      );
+      const qY = new THREE.Quaternion().setFromAxisAngle(
+        new THREE.Vector3(0, 1, 0), DEG(devGamma)
+      );
+
+      const q = new THREE.Quaternion();
+      q.multiply(qZ).multiply(qX).multiply(qY);
+
+      // Corrección de pantalla portrait
+      q.multiply(Q_SCREEN);
+
+      return q;
     }
 
-    // ── GEO → METROS ──────────────────────────────────────────────────────
-    function geoToLocal(lon, lat) {
-      const R = 6371000;
-      const dLat = (lat - CENTER_LAT) * Math.PI / 180;
-      const dLon = (lon - CENTER_LON) * Math.PI / 180;
-      const x =  dLon * R * Math.cos(CENTER_LAT * Math.PI / 180);
-      const z = -dLat * R;
-      return { x, z };
-    }
+    // ════════════════════════════════════════════════════════════════════
+    // THREE.JS — Escena
+    // ════════════════════════════════════════════════════════════════════
+    let scene, camera, renderer;
+    let wallGroup = null;
 
-    // ── THREE.JS ──────────────────────────────────────────────────────────
     function initThree() {
       const canvas = document.getElementById('three-canvas');
       renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
@@ -134,96 +198,14 @@
       renderer.setClearColor(0x000000, 0);
 
       scene = new THREE.Scene();
-      camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 100000);
-      camera.position.set(0, 1.6, 0);
-
-      // ── Relleno polígono ──
-      const shape = new THREE.Shape();
-      POLYGON_COORDS.forEach(([lon, lat], i) => {
-        const { x, z } = geoToLocal(lon, lat);
-        if (i === 0) shape.moveTo(x, z);
-        else shape.lineTo(x, z);
-      });
-
-      const fillGeo = new THREE.ShapeGeometry(shape);
-      const fillMat = new THREE.MeshBasicMaterial({
-        color: 0xFF0000,
-        opacity: 0.5,
-        transparent: true,
-        side: THREE.DoubleSide,
-        depthWrite: false
-      });
-      const fillMesh = new THREE.Mesh(fillGeo, fillMat);
-      fillMesh.rotation.x = -Math.PI / 2;
-      fillMesh.position.y = 0.05;
-      scene.add(fillMesh);
-
-      // ── Contorno polígono ──
-      const pts = POLYGON_COORDS.map(([lon, lat]) => {
-        const { x, z } = geoToLocal(lon, lat);
-        return new THREE.Vector3(x, 0.1, z);
-      });
-      const lineGeo = new THREE.BufferGeometry().setFromPoints(pts);
-      const lineMat = new THREE.LineBasicMaterial({ color: 0xFF0000, linewidth: 4 });
-      scene.add(new THREE.Line(lineGeo, lineMat));
-
-      // ── Paredes verticales del polígono (visibles desde lejos) ──
-      // Esto hace que el polígono sea visible aunque mires horizontalmente
-      for (let i = 0; i < POLYGON_COORDS.length - 1; i++) {
-        const [lon1, lat1] = POLYGON_COORDS[i];
-        const [lon2, lat2] = POLYGON_COORDS[i + 1];
-        const p1 = geoToLocal(lon1, lat1);
-        const p2 = geoToLocal(lon2, lat2);
-
-        const wallPts = [
-          new THREE.Vector3(p1.x, 0,   p1.z),
-          new THREE.Vector3(p1.x, 4,   p1.z),
-          new THREE.Vector3(p2.x, 4,   p2.z),
-          new THREE.Vector3(p2.x, 0,   p2.z),
-          new THREE.Vector3(p1.x, 0,   p1.z),
-        ];
-        const wallGeo = new THREE.BufferGeometry().setFromPoints(wallPts);
-        const wallMat = new THREE.LineBasicMaterial({ color: 0xFF2222, linewidth: 2 });
-        scene.add(new THREE.Line(wallGeo, wallMat));
-
-        // Cara sólida de la pared
-        const wallGeom = new THREE.PlaneGeometry(1, 4);
-        const wallMesh = new THREE.Mesh(
-          wallGeom,
-          new THREE.MeshBasicMaterial({ color: 0xFF0000, opacity: 0.25, transparent: true, side: THREE.DoubleSide })
-        );
-        const midX = (p1.x + p2.x) / 2;
-        const midZ = (p1.z + p2.z) / 2;
-        const dx = p2.x - p1.x;
-        const dz = p2.z - p1.z;
-        const len = Math.sqrt(dx*dx + dz*dz);
-        wallMesh.scale.set(len, 1, 1);
-        wallMesh.position.set(midX, 2, midZ);
-        wallMesh.rotation.y = Math.atan2(dx, dz);
-        scene.add(wallMesh);
-      }
-
-      // ── Etiqueta flotante ──
-      const c = document.createElement('canvas');
-      c.width = 256; c.height = 128;
-      const ctx = c.getContext('2d');
-      ctx.fillStyle = 'rgba(0,0,0,0.8)';
-      ctx.beginPath();
-      ctx.roundRect(4, 4, 248, 120, 14);
-      ctx.fill();
-      ctx.fillStyle = '#FFFFFF';
-      ctx.font = 'bold 32px Arial';
-      ctx.textAlign = 'center';
-      ctx.fillText('ZONA 1', 128, 52);
-      ctx.font = '22px Arial';
-      ctx.fillStyle = '#FF4444';
-      ctx.fillText('ID: 1', 128, 90);
-
-      const tex = new THREE.CanvasTexture(c);
-      const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true }));
-      sprite.scale.set(24, 12, 1);
-      sprite.position.set(0, 12, 0);  // etiqueta alta para verla de lejos
-      scene.add(sprite);
+      camera = new THREE.PerspectiveCamera(
+        70,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        100000
+      );
+      // La cámara siempre en el origen ENU (el usuario es el centro)
+      camera.position.set(0, 0, 0);
 
       scene.add(new THREE.AmbientLight(0xffffff, 1));
 
@@ -236,62 +218,133 @@
       animate();
     }
 
-    // ── ORIENTACIÓN ───────────────────────────────────────────────────────
-    // Quaternion correcto para AR en teléfono vertical (portrait)
-    // Basado en la spec W3C DeviceOrientation
-    const Q0 = new THREE.Quaternion();
-    const DEG = THREE.MathUtils.degToRad;
+    // Construye las paredes cuando ya tenemos GPS
+    function buildWalls(userLon, userLat) {
+      if (wallGroup) {
+        scene.remove(wallGroup);
+        wallGroup.clear();
+      }
+      wallGroup = new THREE.Group();
 
-    // Corrección base: la cámara del teléfono mira hacia -Z en Three.js
-    // pero en portrait el "frente" real es -Y del dispositivo
-    const screenTransform = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5));
+      const originECEF = geoToECEF(userLon, userLat, 0);
 
-    function getDeviceQuaternion() {
-      // Orden ZXY según spec W3C para deviceorientation
-      const qAlpha = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,0,1), DEG(-devAlpha));
-      const qBeta  = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0), DEG( devBeta));
-      const qGamma = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0), DEG( devGamma));
+      // Obtener vértices en ENU (al nivel del suelo y en lo alto)
+      const baseVerts = VERTICES_GEO.map(v => {
+        const ecef = geoToECEF(v.lon, v.lat, 0);
+        const enu  = ecefToENU(ecef, originECEF, userLon, userLat);
+        enu.y = -EYE_HEIGHT; // nivel del suelo relativo al ojo
+        return enu;
+      });
 
-      const q = new THREE.Quaternion();
-      q.multiply(qAlpha);
-      q.multiply(qBeta);
-      q.multiply(qGamma);
+      const topVerts = baseVerts.map(v =>
+        new THREE.Vector3(v.x, v.y + WALL_HEIGHT, v.z)
+      );
 
-      // Aplicar corrección de pantalla portrait
-      q.multiply(screenTransform);
+      // Material paredes: sólido rojo con algo de transparencia
+      const wallMat = new THREE.MeshBasicMaterial({
+        color: 0xFF1111,
+        opacity: 0.75,
+        transparent: true,
+        side: THREE.DoubleSide,
+        depthWrite: false
+      });
 
-      return q;
-    }
+      // Aristas verticales y horizontales como líneas gruesas
+      const edgeMat = new THREE.LineBasicMaterial({ color: 0xFF0000 });
 
-    function initOrientation() {
-      if (typeof DeviceOrientationEvent !== 'undefined' &&
-          typeof DeviceOrientationEvent.requestPermission === 'function') {
-        // iOS 13+: necesita gesto del usuario
-        document.getElementById('info').style.pointerEvents = 'auto';
-        document.getElementById('info').style.cursor = 'pointer';
-        document.getElementById('info').textContent = '👆 Toca aquí para activar orientación';
-        document.getElementById('info').addEventListener('click', async () => {
-          try {
-            await DeviceOrientationEvent.requestPermission();
-            document.getElementById('info').textContent = '📍 GEODEMO — ZONA 1';
-          } catch(e) {
-            document.getElementById('info').textContent = '⚠️ Permiso denegado';
-          }
-        }, { once: true });
+      const n = baseVerts.length;
+      for (let i = 0; i < n; i++) {
+        const j = (i + 1) % n;
+
+        const b0 = baseVerts[i], b1 = baseVerts[j];
+        const t0 = topVerts[i],  t1 = topVerts[j];
+
+        // ── Cara de la pared (dos triángulos) ──
+        const geo = new THREE.BufferGeometry();
+        const positions = new Float32Array([
+          b0.x, b0.y, b0.z,
+          b1.x, b1.y, b1.z,
+          t1.x, t1.y, t1.z,
+
+          b0.x, b0.y, b0.z,
+          t1.x, t1.y, t1.z,
+          t0.x, t0.y, t0.z,
+        ]);
+        geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geo.computeVertexNormals();
+        wallGroup.add(new THREE.Mesh(geo, wallMat));
+
+        // ── Aristas de la cara ──
+        const edgePts = [b0, b1, t1, t0, b0].map(
+          v => new THREE.Vector3(v.x, v.y, v.z)
+        );
+        const edgeGeo = new THREE.BufferGeometry().setFromPoints(edgePts);
+        wallGroup.add(new THREE.Line(edgeGeo, edgeMat));
+
+        // ── Arista vertical del vértice i ──
+        const vertGeo = new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(b0.x, b0.y, b0.z),
+          new THREE.Vector3(t0.x, t0.y, t0.z),
+        ]);
+        wallGroup.add(new THREE.Line(vertGeo, edgeMat));
       }
 
-      // Preferir absolute (con norte real) sobre relativo
-      window.addEventListener('deviceorientationabsolute', onOrient, true);
-      window.addEventListener('deviceorientation', onOrient, true);
+      // ── Etiqueta flotante en el centro del polígono ──
+      const cLon = VERTICES_GEO.reduce((s,v) => s + v.lon, 0) / VERTICES_GEO.length;
+      const cLat = VERTICES_GEO.reduce((s,v) => s + v.lat, 0) / VERTICES_GEO.length;
+      const cECEF = geoToECEF(cLon, cLat, 0);
+      const cENU  = ecefToENU(cECEF, originECEF, userLon, userLat);
+      cENU.y = -EYE_HEIGHT + WALL_HEIGHT + 3;
+
+      const cv = document.createElement('canvas');
+      cv.width = 256; cv.height = 128;
+      const ctx = cv.getContext('2d');
+      ctx.fillStyle = 'rgba(0,0,0,0.8)';
+      ctx.beginPath();
+      ctx.roundRect(4, 4, 248, 120, 14);
+      ctx.fill();
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = 'bold 34px Arial';
+      ctx.textAlign = 'center';
+      ctx.fillText('ZONA 1', 128, 52);
+      ctx.font = '22px Arial';
+      ctx.fillStyle = '#FF4444';
+      ctx.fillText('ID: 1', 128, 90);
+
+      const tex    = new THREE.CanvasTexture(cv);
+      const sprite = new THREE.Sprite(
+        new THREE.SpriteMaterial({ map: tex, transparent: true })
+      );
+      sprite.scale.set(20, 10, 1);
+      sprite.position.copy(cENU);
+      wallGroup.add(sprite);
+
+      scene.add(wallGroup);
     }
 
-    function onOrient(e) {
-      if (e.alpha !== null) devAlpha = e.alpha;
-      if (e.beta  !== null) devBeta  = e.beta;
-      if (e.gamma !== null) devGamma = e.gamma;
+    // ════════════════════════════════════════════════════════════════════
+    // CÁMARA DEL TELÉFONO
+    // ════════════════════════════════════════════════════════════════════
+    async function startCamera() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment' },
+          audio: false
+        });
+        document.getElementById('video').srcObject = stream;
+      } catch(e) {
+        document.getElementById('status').textContent = '❌ Sin acceso a cámara';
+      }
     }
 
-    // ── GPS ───────────────────────────────────────────────────────────────
+    // ════════════════════════════════════════════════════════════════════
+    // GPS
+    // ════════════════════════════════════════════════════════════════════
+    let userLat = null, userLon = null;
+    let wallsBuilt = false;
+    const statusEl = document.getElementById('status');
+    const debugEl  = document.getElementById('debug');
+
     function initGPS() {
       if (!navigator.geolocation) {
         statusEl.textContent = '❌ GPS no disponible';
@@ -302,46 +355,95 @@
         userLon = pos.coords.longitude;
         const acc = pos.coords.accuracy.toFixed(0);
 
+        // Reconstruir paredes cada vez que cambia el GPS
+        // (el origen ENU cambia con el usuario)
+        buildWalls(userLon, userLat);
+
         statusEl.style.background = acc < 15
           ? 'rgba(0,140,0,0.85)'
           : acc < 40
             ? 'rgba(180,120,0,0.85)'
             : 'rgba(180,0,0,0.85)';
-
         statusEl.textContent = `📡 GPS ±${acc}m`;
 
-        const { x, z } = geoToLocal(userLon, userLat);
-        const dist = Math.sqrt(x*x + z*z).toFixed(0);
+        // Distancia al centroide del polígono
+        const R = 6371000;
+        const cLon = VERTICES_GEO.reduce((s,v) => s + v.lon, 0) / VERTICES_GEO.length;
+        const cLat = VERTICES_GEO.reduce((s,v) => s + v.lat, 0) / VERTICES_GEO.length;
+        const dLat = (cLat - userLat) * Math.PI / 180;
+        const dLon = (cLon - userLon) * Math.PI / 180;
+        const a = Math.sin(dLat/2)**2 +
+                  Math.cos(userLat*Math.PI/180) * Math.cos(cLat*Math.PI/180) *
+                  Math.sin(dLon/2)**2;
+        const dist = (R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a))).toFixed(0);
 
         debugEl.innerHTML =
           `Lat: ${userLat.toFixed(6)}<br>` +
           `Lon: ${userLon.toFixed(6)}<br>` +
-          `Dist: <b>${dist}m</b> al centro<br>` +
+          `Dist al polígono: <b>${dist}m</b><br>` +
           `α:${devAlpha.toFixed(0)}° β:${devBeta.toFixed(0)}° γ:${devGamma.toFixed(0)}°`;
 
       }, err => {
         statusEl.textContent = '⚠️ GPS: ' + err.message;
         statusEl.style.background = 'rgba(180,0,0,0.85)';
-      }, { enableHighAccuracy: true, maximumAge: 500 });
+      }, { enableHighAccuracy: true, maximumAge: 1000 });
     }
 
-    // ── LOOP ──────────────────────────────────────────────────────────────
+    // ════════════════════════════════════════════════════════════════════
+    // SENSORES DE ORIENTACIÓN
+    // ════════════════════════════════════════════════════════════════════
+    function initOrientation() {
+      const infoEl = document.getElementById('info');
+
+      const activate = async () => {
+        if (typeof DeviceOrientationEvent !== 'undefined' &&
+            typeof DeviceOrientationEvent.requestPermission === 'function') {
+          try {
+            await DeviceOrientationEvent.requestPermission();
+          } catch(e) {
+            infoEl.textContent = '⚠️ Permiso de orientación denegado';
+            return;
+          }
+        }
+        infoEl.textContent = '📍 GEODEMO — ZONA 1';
+        orientationReady = true;
+      };
+
+      // iOS necesita gesto; Android activa solo
+      document.body.addEventListener('click', activate, { once: true });
+      activate(); // intento inmediato para Android
+
+      window.addEventListener('deviceorientationabsolute', e => {
+        if (e.alpha !== null) devAlpha = e.alpha;
+        if (e.beta  !== null) devBeta  = e.beta;
+        if (e.gamma !== null) devGamma = e.gamma;
+      }, true);
+
+      window.addEventListener('deviceorientation', e => {
+        if (e.alpha !== null) devAlpha = e.alpha;
+        if (e.beta  !== null) devBeta  = e.beta;
+        if (e.gamma !== null) devGamma = e.gamma;
+      }, true);
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // LOOP DE RENDER
+    // ════════════════════════════════════════════════════════════════════
     function animate() {
       requestAnimationFrame(animate);
 
-      // Mover cámara a posición GPS del usuario
-      if (userLat !== null) {
-        const { x, z } = geoToLocal(userLon, userLat);
-        camera.position.set(x, 1.6, z);
-      }
+      // La cámara siempre en origen (el mundo se construye relativo al usuario)
+      camera.position.set(0, 0, 0);
 
-      // Aplicar orientación correcta para cualquier ángulo del teléfono
-      camera.quaternion.copy(getDeviceQuaternion());
+      // Aplicar orientación del dispositivo en marco ENU
+      camera.quaternion.copy(getENUQuaternion());
 
       renderer.render(scene, camera);
     }
 
-    // ── ARRANQUE ──────────────────────────────────────────────────────────
+    // ════════════════════════════════════════════════════════════════════
+    // ARRANQUE
+    // ════════════════════════════════════════════════════════════════════
     startCamera();
     initThree();
     initOrientation();
