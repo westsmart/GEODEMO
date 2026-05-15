@@ -1,129 +1,279 @@
 <!DOCTYPE html>
 <html>
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>GEODEMO - ZONA1 AR</title>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>GEODEMO - ZONA1</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { overflow: hidden; background: black; font-family: Arial, sans-serif; }
 
-    <!-- A-Frame -->
-    <script src="https://aframe.io/releases/1.4.0/aframe.min.js"></script>
-    <!-- AR.js con soporte de geolocalización -->
-    <script src="https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar-nft.js"></script>
-    <script src="https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar.js"></script>
+    #info {
+      position: fixed;
+      top: 12px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.75);
+      color: white;
+      padding: 8px 18px;
+      border-radius: 20px;
+      font-size: 13px;
+      z-index: 200;
+      text-align: center;
+      white-space: nowrap;
+    }
 
-    <style>
-      * { margin: 0; padding: 0; box-sizing: border-box; }
-      body { overflow: hidden; font-family: Arial, sans-serif; }
+    #status {
+      position: fixed;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,80,200,0.85);
+      color: white;
+      padding: 8px 18px;
+      border-radius: 16px;
+      font-size: 12px;
+      z-index: 200;
+      text-align: center;
+      min-width: 280px;
+    }
 
-      #info-panel {
-        position: fixed;
-        top: 10px;
-        left: 50%;
-        transform: translateX(-50%);
-        background: rgba(0,0,0,0.7);
-        color: white;
-        padding: 10px 18px;
-        border-radius: 20px;
-        font-size: 13px;
-        z-index: 9999;
-        text-align: center;
-        pointer-events: none;
+    #debug {
+      position: fixed;
+      bottom: 60px;
+      left: 8px;
+      background: rgba(0,0,0,0.6);
+      color: #0f0;
+      padding: 6px 10px;
+      border-radius: 8px;
+      font-size: 11px;
+      z-index: 200;
+      line-height: 1.8;
+    }
+
+    #video {
+      position: fixed;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      object-fit: cover;
+      z-index: 0;
+    }
+
+    #three-canvas {
+      position: fixed;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      z-index: 1;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="three-canvas"></canvas>
+
+  <div id="info">📍 GEODEMO — ZONA 1</div>
+  <div id="debug">Iniciando...</div>
+  <div id="status">📡 Esperando GPS...</div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+  <script>
+    // ── POLÍGONO ZONA1 ────────────────────────────────────────────────────
+    const POLYGON_COORDS = [
+      [-70.668177278025937, -33.454657926808004],
+      [-70.667171620456187, -33.454476908445450],
+      [-70.667155164241407, -33.454559189519337],
+      [-70.668169964152710, -33.454736550945277],
+      [-70.668177278025937, -33.454657926808004]
+    ];
+
+    const CENTER_LON = -70.667666;
+    const CENTER_LAT = -33.454617;
+
+    // ── ESTADO ────────────────────────────────────────────────────────────
+    let userLat = null, userLon = null;
+    let scene, camera, renderer;
+    let alpha = 0, beta = 90, gamma = 0;
+
+    const statusEl = document.getElementById('status');
+    const debugEl  = document.getElementById('debug');
+
+    // ── CÁMARA ────────────────────────────────────────────────────────────
+    async function startCamera() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment' },
+          audio: false
+        });
+        document.getElementById('video').srcObject = stream;
+      } catch(e) {
+        statusEl.textContent = '❌ Sin acceso a cámara';
+      }
+    }
+
+    // ── GEO → METROS ──────────────────────────────────────────────────────
+    function geoToLocal(lon, lat) {
+      const R = 6371000;
+      const dLat = (lat - CENTER_LAT) * Math.PI / 180;
+      const dLon = (lon - CENTER_LON) * Math.PI / 180;
+      const x =  dLon * R * Math.cos(CENTER_LAT * Math.PI / 180);
+      const z = -dLat * R;
+      return { x, z };
+    }
+
+    // ── THREE.JS ──────────────────────────────────────────────────────────
+    function initThree() {
+      const canvas = document.getElementById('three-canvas');
+      renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.setClearColor(0x000000, 0);
+
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 100000);
+      camera.position.set(0, 1.6, 0);
+
+      // ── Relleno del polígono ──
+      const shape = new THREE.Shape();
+      POLYGON_COORDS.forEach(([lon, lat], i) => {
+        const { x, z } = geoToLocal(lon, lat);
+        if (i === 0) shape.moveTo(x, z);
+        else shape.lineTo(x, z);
+      });
+
+      const fillGeo = new THREE.ShapeGeometry(shape);
+      const fillMat = new THREE.MeshBasicMaterial({
+        color: 0xFF0000,
+        opacity: 0.5,
+        transparent: true,
+        side: THREE.DoubleSide,
+        depthWrite: false
+      });
+      const fillMesh = new THREE.Mesh(fillGeo, fillMat);
+      fillMesh.rotation.x = -Math.PI / 2;
+      fillMesh.position.y = 0.05;
+      scene.add(fillMesh);
+
+      // ── Contorno del polígono ──
+      const pts = POLYGON_COORDS.map(([lon, lat]) => {
+        const { x, z } = geoToLocal(lon, lat);
+        return new THREE.Vector3(x, 0.1, z);
+      });
+      const lineGeo = new THREE.BufferGeometry().setFromPoints(pts);
+      const lineMat = new THREE.LineBasicMaterial({ color: 0xFF0000, linewidth: 4 });
+      scene.add(new THREE.Line(lineGeo, lineMat));
+
+      // ── Etiqueta flotante ──
+      const c = document.createElement('canvas');
+      c.width = 256; c.height = 128;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = 'rgba(0,0,0,0.75)';
+      ctx.beginPath();
+      ctx.roundRect(4, 4, 248, 120, 14);
+      ctx.fill();
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = 'bold 32px Arial';
+      ctx.textAlign = 'center';
+      ctx.fillText('ZONA 1', 128, 56);
+      ctx.font = '22px Arial';
+      ctx.fillStyle = '#FF4444';
+      ctx.fillText('ID: 1', 128, 94);
+
+      const tex = new THREE.CanvasTexture(c);
+      const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true }));
+      sprite.scale.set(24, 12, 1);
+      sprite.position.set(0, 10, 0);
+      scene.add(sprite);
+
+      scene.add(new THREE.AmbientLight(0xffffff, 1));
+
+      window.addEventListener('resize', () => {
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+      });
+
+      animate();
+    }
+
+    // ── ORIENTACIÓN ───────────────────────────────────────────────────────
+    function initOrientation() {
+      // iOS necesita permiso explícito
+      if (typeof DeviceOrientationEvent !== 'undefined' &&
+          typeof DeviceOrientationEvent.requestPermission === 'function') {
+        document.body.addEventListener('click', async () => {
+          try { await DeviceOrientationEvent.requestPermission(); } catch(e) {}
+        }, { once: true });
+      }
+      window.addEventListener('deviceorientationabsolute', onOrient, true);
+      window.addEventListener('deviceorientation', onOrient, true);
+    }
+
+    function onOrient(e) {
+      if (e.alpha !== null) alpha = e.alpha;
+      if (e.beta  !== null) beta  = e.beta;
+      if (e.gamma !== null) gamma = e.gamma;
+    }
+
+    // ── GPS ───────────────────────────────────────────────────────────────
+    function initGPS() {
+      if (!navigator.geolocation) {
+        statusEl.textContent = '❌ GPS no disponible';
+        return;
+      }
+      navigator.geolocation.watchPosition(pos => {
+        userLat = pos.coords.latitude;
+        userLon = pos.coords.longitude;
+        const acc = pos.coords.accuracy.toFixed(0);
+
+        statusEl.style.background = acc < 20
+          ? 'rgba(0,140,0,0.85)'
+          : 'rgba(180,120,0,0.85)';
+        statusEl.textContent = `📡 GPS activo | Precisión: ±${acc}m`;
+
+        const { x, z } = geoToLocal(userLon, userLat);
+        const dist = Math.sqrt(x*x + z*z).toFixed(0);
+
+        debugEl.innerHTML =
+          `Lat: ${userLat.toFixed(6)}<br>` +
+          `Lon: ${userLon.toFixed(6)}<br>` +
+          `Dist al polígono: <b>${dist}m</b><br>` +
+          `Heading: ${alpha.toFixed(1)}°`;
+
+      }, err => {
+        statusEl.textContent = '⚠️ Error GPS: ' + err.message;
+        statusEl.style.background = 'rgba(180,0,0,0.85)';
+      }, { enableHighAccuracy: true, maximumAge: 500 });
+    }
+
+    // ── LOOP ──────────────────────────────────────────────────────────────
+    function animate() {
+      requestAnimationFrame(animate);
+
+      if (userLat !== null) {
+        const { x, z } = geoToLocal(userLon, userLat);
+        camera.position.set(x, 1.6, z);
       }
 
-      #status {
-        position: fixed;
-        bottom: 20px;
-        left: 50%;
-        transform: translateX(-50%);
-        background: rgba(0, 100, 255, 0.8);
-        color: white;
-        padding: 8px 16px;
-        border-radius: 16px;
-        font-size: 12px;
-        z-index: 9999;
-        text-align: center;
-        min-width: 260px;
-      }
-    </style>
-  </head>
+      // Aplicar orientación del dispositivo a la cámara
+      const euler = new THREE.Euler(
+        THREE.MathUtils.degToRad(beta),
+       -THREE.MathUtils.degToRad(alpha),
+       -THREE.MathUtils.degToRad(gamma),
+        'YXZ'
+      );
+      camera.quaternion.setFromEuler(euler);
 
-  <body>
-    <div id="info-panel">📍 GEODEMO — ZONA 1 | Apunta al terreno</div>
-    <div id="status">📡 Obteniendo GPS...</div>
+      renderer.render(scene, camera);
+    }
 
-    <a-scene
-      vr-mode-ui="enabled: false"
-      arjs="sourceType: webcam; videoTexture: true; debugUIEnabled: false; trackingMethod: best;"
-      renderer="antialias: true; alpha: true"
-      embedded
-    >
-      <a-camera gps-projected-camera rotation-reader></a-camera>
-
-      <!-- Vértices del polígono ZONA1 convertidos a puntos individuales -->
-      <!-- Centro aproximado del polígono para la etiqueta -->
-      <a-entity
-        gps-projected-entity-place="latitude: -33.454617; longitude: -70.667666"
-      >
-        <!-- Etiqueta flotante -->
-        <a-text
-          value="ZONA 1\nID: 1"
-          align="center"
-          color="#FFFFFF"
-          scale="30 30 30"
-          position="0 20 0"
-          look-at="[gps-projected-camera]"
-        ></a-text>
-
-        <!-- Marcador visual en el centro -->
-        <a-box
-          color="#0055FF"
-          opacity="0.7"
-          scale="10 5 10"
-          position="0 2.5 0"
-        ></a-box>
-      </a-entity>
-
-      <!-- Puntos en cada vértice del polígono para visualizar el contorno -->
-      <a-entity gps-projected-entity-place="latitude: -33.454658; longitude: -70.668177">
-        <a-sphere color="#FF3300" radius="3" opacity="0.9"></a-sphere>
-      </a-entity>
-
-      <a-entity gps-projected-entity-place="latitude: -33.454477; longitude: -70.667172">
-        <a-sphere color="#FF3300" radius="3" opacity="0.9"></a-sphere>
-      </a-entity>
-
-      <a-entity gps-projected-entity-place="latitude: -33.454559; longitude: -70.667155">
-        <a-sphere color="#FF3300" radius="3" opacity="0.9"></a-sphere>
-      </a-entity>
-
-      <a-entity gps-projected-entity-place="latitude: -33.454737; longitude: -70.816970">
-        <a-sphere color="#FF3300" radius="3" opacity="0.9"></a-sphere>
-      </a-entity>
-
-    </a-scene>
-
-    <script>
-      // Estado GPS
-      const statusEl = document.getElementById("status");
-
-      if (navigator.geolocation) {
-        navigator.geolocation.watchPosition(
-          (pos) => {
-            const lat = pos.coords.latitude.toFixed(6);
-            const lon = pos.coords.longitude.toFixed(6);
-            const acc = pos.coords.accuracy.toFixed(0);
-            statusEl.textContent = `📡 GPS: ${lat}, ${lon} | ±${acc}m`;
-            statusEl.style.background = "rgba(0, 160, 0, 0.8)";
-          },
-          (err) => {
-            statusEl.textContent = "⚠️ Error GPS: " + err.message;
-            statusEl.style.background = "rgba(200, 0, 0, 0.8)";
-          },
-          { enableHighAccuracy: true, maximumAge: 1000 }
-        );
-      } else {
-        statusEl.textContent = "❌ GPS no disponible en este dispositivo";
-      }
-    </script>
-  </body>
+    // ── ARRANQUE ──────────────────────────────────────────────────────────
+    startCamera();
+    initThree();
+    initOrientation();
+    initGPS();
+  </script>
+</body>
 </html>
