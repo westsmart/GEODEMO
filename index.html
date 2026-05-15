@@ -42,7 +42,7 @@
       position: fixed;
       bottom: 60px;
       left: 8px;
-      background: rgba(0,0,0,0.6);
+      background: rgba(0,0,0,0.65);
       color: #0f0;
       padding: 6px 10px;
       border-radius: 8px;
@@ -95,7 +95,9 @@
     // ── ESTADO ────────────────────────────────────────────────────────────
     let userLat = null, userLon = null;
     let scene, camera, renderer;
-    let alpha = 0, beta = 90, gamma = 0;
+
+    // Orientación cruda del dispositivo
+    let devAlpha = 0, devBeta = 90, devGamma = 0;
 
     const statusEl = document.getElementById('status');
     const debugEl  = document.getElementById('debug');
@@ -135,7 +137,7 @@
       camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 100000);
       camera.position.set(0, 1.6, 0);
 
-      // ── Relleno del polígono ──
+      // ── Relleno polígono ──
       const shape = new THREE.Shape();
       POLYGON_COORDS.forEach(([lon, lat], i) => {
         const { x, z } = geoToLocal(lon, lat);
@@ -156,7 +158,7 @@
       fillMesh.position.y = 0.05;
       scene.add(fillMesh);
 
-      // ── Contorno del polígono ──
+      // ── Contorno polígono ──
       const pts = POLYGON_COORDS.map(([lon, lat]) => {
         const { x, z } = geoToLocal(lon, lat);
         return new THREE.Vector3(x, 0.1, z);
@@ -165,26 +167,62 @@
       const lineMat = new THREE.LineBasicMaterial({ color: 0xFF0000, linewidth: 4 });
       scene.add(new THREE.Line(lineGeo, lineMat));
 
+      // ── Paredes verticales del polígono (visibles desde lejos) ──
+      // Esto hace que el polígono sea visible aunque mires horizontalmente
+      for (let i = 0; i < POLYGON_COORDS.length - 1; i++) {
+        const [lon1, lat1] = POLYGON_COORDS[i];
+        const [lon2, lat2] = POLYGON_COORDS[i + 1];
+        const p1 = geoToLocal(lon1, lat1);
+        const p2 = geoToLocal(lon2, lat2);
+
+        const wallPts = [
+          new THREE.Vector3(p1.x, 0,   p1.z),
+          new THREE.Vector3(p1.x, 4,   p1.z),
+          new THREE.Vector3(p2.x, 4,   p2.z),
+          new THREE.Vector3(p2.x, 0,   p2.z),
+          new THREE.Vector3(p1.x, 0,   p1.z),
+        ];
+        const wallGeo = new THREE.BufferGeometry().setFromPoints(wallPts);
+        const wallMat = new THREE.LineBasicMaterial({ color: 0xFF2222, linewidth: 2 });
+        scene.add(new THREE.Line(wallGeo, wallMat));
+
+        // Cara sólida de la pared
+        const wallGeom = new THREE.PlaneGeometry(1, 4);
+        const wallMesh = new THREE.Mesh(
+          wallGeom,
+          new THREE.MeshBasicMaterial({ color: 0xFF0000, opacity: 0.25, transparent: true, side: THREE.DoubleSide })
+        );
+        const midX = (p1.x + p2.x) / 2;
+        const midZ = (p1.z + p2.z) / 2;
+        const dx = p2.x - p1.x;
+        const dz = p2.z - p1.z;
+        const len = Math.sqrt(dx*dx + dz*dz);
+        wallMesh.scale.set(len, 1, 1);
+        wallMesh.position.set(midX, 2, midZ);
+        wallMesh.rotation.y = Math.atan2(dx, dz);
+        scene.add(wallMesh);
+      }
+
       // ── Etiqueta flotante ──
       const c = document.createElement('canvas');
       c.width = 256; c.height = 128;
       const ctx = c.getContext('2d');
-      ctx.fillStyle = 'rgba(0,0,0,0.75)';
+      ctx.fillStyle = 'rgba(0,0,0,0.8)';
       ctx.beginPath();
       ctx.roundRect(4, 4, 248, 120, 14);
       ctx.fill();
       ctx.fillStyle = '#FFFFFF';
       ctx.font = 'bold 32px Arial';
       ctx.textAlign = 'center';
-      ctx.fillText('ZONA 1', 128, 56);
+      ctx.fillText('ZONA 1', 128, 52);
       ctx.font = '22px Arial';
       ctx.fillStyle = '#FF4444';
-      ctx.fillText('ID: 1', 128, 94);
+      ctx.fillText('ID: 1', 128, 90);
 
       const tex = new THREE.CanvasTexture(c);
       const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true }));
       sprite.scale.set(24, 12, 1);
-      sprite.position.set(0, 10, 0);
+      sprite.position.set(0, 12, 0);  // etiqueta alta para verla de lejos
       scene.add(sprite);
 
       scene.add(new THREE.AmbientLight(0xffffff, 1));
@@ -199,22 +237,58 @@
     }
 
     // ── ORIENTACIÓN ───────────────────────────────────────────────────────
+    // Quaternion correcto para AR en teléfono vertical (portrait)
+    // Basado en la spec W3C DeviceOrientation
+    const Q0 = new THREE.Quaternion();
+    const DEG = THREE.MathUtils.degToRad;
+
+    // Corrección base: la cámara del teléfono mira hacia -Z en Three.js
+    // pero en portrait el "frente" real es -Y del dispositivo
+    const screenTransform = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5));
+
+    function getDeviceQuaternion() {
+      // Orden ZXY según spec W3C para deviceorientation
+      const qAlpha = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,0,1), DEG(-devAlpha));
+      const qBeta  = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0), DEG( devBeta));
+      const qGamma = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0), DEG( devGamma));
+
+      const q = new THREE.Quaternion();
+      q.multiply(qAlpha);
+      q.multiply(qBeta);
+      q.multiply(qGamma);
+
+      // Aplicar corrección de pantalla portrait
+      q.multiply(screenTransform);
+
+      return q;
+    }
+
     function initOrientation() {
-      // iOS necesita permiso explícito
       if (typeof DeviceOrientationEvent !== 'undefined' &&
           typeof DeviceOrientationEvent.requestPermission === 'function') {
-        document.body.addEventListener('click', async () => {
-          try { await DeviceOrientationEvent.requestPermission(); } catch(e) {}
+        // iOS 13+: necesita gesto del usuario
+        document.getElementById('info').style.pointerEvents = 'auto';
+        document.getElementById('info').style.cursor = 'pointer';
+        document.getElementById('info').textContent = '👆 Toca aquí para activar orientación';
+        document.getElementById('info').addEventListener('click', async () => {
+          try {
+            await DeviceOrientationEvent.requestPermission();
+            document.getElementById('info').textContent = '📍 GEODEMO — ZONA 1';
+          } catch(e) {
+            document.getElementById('info').textContent = '⚠️ Permiso denegado';
+          }
         }, { once: true });
       }
+
+      // Preferir absolute (con norte real) sobre relativo
       window.addEventListener('deviceorientationabsolute', onOrient, true);
       window.addEventListener('deviceorientation', onOrient, true);
     }
 
     function onOrient(e) {
-      if (e.alpha !== null) alpha = e.alpha;
-      if (e.beta  !== null) beta  = e.beta;
-      if (e.gamma !== null) gamma = e.gamma;
+      if (e.alpha !== null) devAlpha = e.alpha;
+      if (e.beta  !== null) devBeta  = e.beta;
+      if (e.gamma !== null) devGamma = e.gamma;
     }
 
     // ── GPS ───────────────────────────────────────────────────────────────
@@ -228,10 +302,13 @@
         userLon = pos.coords.longitude;
         const acc = pos.coords.accuracy.toFixed(0);
 
-        statusEl.style.background = acc < 20
+        statusEl.style.background = acc < 15
           ? 'rgba(0,140,0,0.85)'
-          : 'rgba(180,120,0,0.85)';
-        statusEl.textContent = `📡 GPS activo | Precisión: ±${acc}m`;
+          : acc < 40
+            ? 'rgba(180,120,0,0.85)'
+            : 'rgba(180,0,0,0.85)';
+
+        statusEl.textContent = `📡 GPS ±${acc}m`;
 
         const { x, z } = geoToLocal(userLon, userLat);
         const dist = Math.sqrt(x*x + z*z).toFixed(0);
@@ -239,11 +316,11 @@
         debugEl.innerHTML =
           `Lat: ${userLat.toFixed(6)}<br>` +
           `Lon: ${userLon.toFixed(6)}<br>` +
-          `Dist al polígono: <b>${dist}m</b><br>` +
-          `Heading: ${alpha.toFixed(1)}°`;
+          `Dist: <b>${dist}m</b> al centro<br>` +
+          `α:${devAlpha.toFixed(0)}° β:${devBeta.toFixed(0)}° γ:${devGamma.toFixed(0)}°`;
 
       }, err => {
-        statusEl.textContent = '⚠️ Error GPS: ' + err.message;
+        statusEl.textContent = '⚠️ GPS: ' + err.message;
         statusEl.style.background = 'rgba(180,0,0,0.85)';
       }, { enableHighAccuracy: true, maximumAge: 500 });
     }
@@ -252,19 +329,14 @@
     function animate() {
       requestAnimationFrame(animate);
 
+      // Mover cámara a posición GPS del usuario
       if (userLat !== null) {
         const { x, z } = geoToLocal(userLon, userLat);
         camera.position.set(x, 1.6, z);
       }
 
-      // Aplicar orientación del dispositivo a la cámara
-      const euler = new THREE.Euler(
-        THREE.MathUtils.degToRad(beta),
-       -THREE.MathUtils.degToRad(alpha),
-       -THREE.MathUtils.degToRad(gamma),
-        'YXZ'
-      );
-      camera.quaternion.setFromEuler(euler);
+      // Aplicar orientación correcta para cualquier ángulo del teléfono
+      camera.quaternion.copy(getDeviceQuaternion());
 
       renderer.render(scene, camera);
     }
